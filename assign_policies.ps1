@@ -10,6 +10,7 @@ $start = Get-Date
 $outfile="C:\temp\log_policy_assign.txt"
 $skippedfile="C:\temp\skipped_users.txt"
 $csvall="C:\temp\assigned_policies.csv"
+$csvexcluded="C:\temp\excluded_users.csv"
 
 Remove-Item $outfile
 Remove-Item $skippedfile
@@ -18,6 +19,8 @@ Echo "Initializing..." | Out-File -Append -Encoding default $outfile
 Echo "Initializing..." | Out-File -Append -Encoding default $skippedfile
 $csvheaders="Type;Name;LogonName;mail;Title;Policy before;Assigned Policy;Changed"
 Echo $csvheaders | Out-File -Append -Encoding default -FilePath $csvall
+$excludedcsvheaders="Name;LogonName;mail;Title;Assigned Policy"
+Echo $excludedcsvheaders | Out-File -Append -Encoding default -FilePath $csvexcluded
 
 ## Define E-Mail settings
 $smtpServer="<SMTP Server>"
@@ -47,6 +50,7 @@ Connect-QADService -Proxy
 ## Define user groups
 $exchangelync="<group 1>"
 $mdxlync="<group 2>"
+$excludedlync="<group containing users with policy exception"
 
 ## Reset counters to 0
 $exchangecount=0
@@ -54,12 +58,34 @@ $mdxcount=0
 $exchangeskip=0
 $mdxskip=0
 $sendmail="no"
+$excludedcount=0
+
+$excludestart = Get-Date
+
+## Loop through exclusiongroup
+$excludedgroup = Get-QADGroupMember -Proxy $excludedlync -SizeLimit 9999
+
+foreach ($excludeduser in $excludedgroup) {
+    ## get user SIP address
+    $excludedsip=(Get-QADUser $excludeduser -DontUseDefaultIncludedProperties -IncludedProperties msrtcsip-primaryuseraddress)."msrtcsip-primaryuseraddress"
+    ## get user assigned policy
+    $excludedsetpolicy=(Get-Csuser $excludedsip).ConferencingPolicy
+    ## get userdetails to be included in CSV
+    $excludedtetails=Get-QADUser $excludeduser -DontUseDefaultIncludedProperties -IncludedProperties LogonName,Name,mail,Title
+    ## Add excluded user details to CSV
+    $excludedcsvline=$excludedtetails.Name + ";" + $excludedtetails.LogonName + ";" + $excludedtetails.mail + ";" + $excludedtetails.Title + ";" +  "$excludedsetpolicy" + ";"
+    echo $excludedcsvline | Out-File -Append -FilePath $csvexcluded
+    $excludedcount=$excludedcount+1
+}
+$excludetime = Get-Date
+
+$exchangestart = Get-Date
 
 ## Loop through Exchange Lync users
 $exchangegroup=Get-QADGroupMember -Proxy $exchangelync -SizeLimit 9999
 
 echo "Starting assignment for Exchange Users..." | Out-File -FilePath $outfile -Encoding Default -Append
-$exchangestart = Get-Date
+
 foreach ($user in $exchangegroup)
 
 {
@@ -116,10 +142,11 @@ foreach ($user in $exchangegroup)
 
 
 ## Loop through MDX Lync users
+$mdxstart = Get-Date
 $mdxgroup=Get-QADGroupMember -Proxy $mdxlync -SizeLimit 9999
 
 echo "Starting assignment for MDX Users..." | Out-File -FilePath $outfile -Encoding Default -Append
-$mdxstart = Get-Date
+
 foreach ($user in $mdxgroup)
 
 {
@@ -171,6 +198,7 @@ foreach ($user in $mdxgroup)
  
 ## Calculate duration
 $end = Get-Date
+$excludeduration = $excludetime-$excludestart
 $exchangeduration = $exchangetime-$exchangestart
 $mdxduration = $mdxtime-$mdxstart
 $totalduration = $end-$start
@@ -182,26 +210,23 @@ $totaldurationminutes = [math]::Round($totalduration.TotalMinutes)
 $totaldurationseconds = [math]::Round($totalduration.TotalSeconds)
 
 ## Set mail body to successful and include details
-$body="Processing finished - Please see attachment for details.`n`nAdjusted Exchange users: $exchangecount `nSkipped Exchange users: $exchangeskip `nDuration for Exchange adjustments: $exchangeminutes Minutes ( $exchangeseconds Seconds) `n`n`nAdjusted MDX users: $mdxcount `nSkipped MDX user: $mdxskip `nDuration for MDX adjustments: $mdxminutes Minutes ( $mdxseconds Seconds)`n`nOverall script execution time: $totaldurationminutes Minutes ( $totaldurationseconds Seconds )"
+$body="Processing finished - Please see attachment for details.`n`nAdjusted Exchange users: $exchangecount `nSkipped Exchange users: $exchangeskip `nDuration for Exchange adjustments: $exchangeminutes Minutes ( $exchangeseconds Seconds) `n`n`nAdjusted MDX users: $mdxcount `nSkipped MDX user: $mdxskip `nDuration for MDX adjustments: $mdxminutes Minutes ( $mdxseconds Seconds)`n`nUsers with policy exception: $excludedcount`n`nOverall script execution time: $totaldurationminutes Minutes ( $totaldurationseconds Seconds )"    
     
 }
 
-## check if any changes have been made at all
-echo "Number of changed MDX accounts: $mdxcount"
-echo "Number of changed Exchange accounts: $exchangecount"
-
 ## check if any changes have been made. Skip Send E-Mail in case no changes have been detected
 if ($mdxcount -gt 0) {
-    echo "Greater than 0: $mdxcount"
+    ## Send E-Mail if MDX Users have been adjusted
     $sendmail="yes"
     }
 else {
-    echo "NOT greater than 0: $mdxcount"
+    ## Do NOT send E-Mail if no MDX users have been adjusted
         if ($exchangecount -gt 0) {
-            echo "Exchange greater than 0: $exchangecount"
+            ## Send E-Mail if Exchange users have been adjusted
             $sendmail="yes"
         }
         else {
+			## Do NOT send E-Mail if no users have been adjusted
             echo "Exchange NOT greater than 0: $exchangecount"
             $sendmail="no"
         }
@@ -212,7 +237,7 @@ else {
 ## send E-Mail to configured recipients with Logfile and CSV attached if changes have been made
 if ($sendmail -eq "yes") {
     echo "Sending E-Mail notification to $to" | Out-File -FilePath $outfile -Encoding Default -Append
-    Send-Mailmessage -smtpServer $smtpServer -from $from -to $to -subject $subject -body $body -priority High -Attachments $outfile,$csvall
+    Send-Mailmessage -smtpServer $smtpServer -from $from -to $to -subject $subject -body $body -priority High -Attachments $outfile,$csvall,$csvexcluded
 }
 else {
     echo "NOT sending E-Mail as no changes have been made" | Out-File -FilePath $outfile -Encoding Default -Append
@@ -221,6 +246,10 @@ else {
 ## close session to Skype for Business server
 Remove-PSSession $lync_session
 echo "Processing finished." | Out-File -FilePath $outfile -Encoding Default -Append
+echo "Number of users with policy exception: $excludedcount" | Out-File -FilePath $outfile -Encoding Default -Append
+echo "Number of changed MDX accounts: $mdxcount" | Out-File -FilePath $outfile -Encoding Default -Append
+echo "Number of changed Exchange accounts: $exchangecount" | Out-File -FilePath $outfile -Encoding Default -Append
 echo "Elapsed time for Exchange users: $exchangeminutes Minutes ( $exchangeseconds Seconds)." | Out-File -FilePath $outfile -Encoding Default -Append
 echo "Elapsed time for MDX users: $mdxminutes Minutes ( $mdxseconds Seconds)." | Out-File -FilePath $outfile -Encoding Default -Append
+echo "Elapsed time for users with exception: $excludeminutes Minutes ( $excludeseconds Seconds)." | Out-File $outfile -Encoding Default -Append
 echo "Totally elapsed time: $totaldurationminutes Minutes ( $totaldurationseconds Seconds)." | Out-File -FilePath $outfile -Encoding Default -Append
